@@ -1,176 +1,203 @@
-# train.py (Combined Orchestrator for Baselines A, B, D, E)
+# train.py (Unified Baseline Trainer - Full Dataset, Timer, Global Registry)
 import os
 import argparse
 import logging
+import time
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
 
-# Import utility functions
-# NOTE: load_baselineA_datasets is used by all TF-IDF models (A, D, E)
-from utils.data_loader import load_baselineA_datasets, load_data_and_split
-from utils.preprocess import BiLSTMPreprocessor, TFIDFLogRegPreprocessor
+from utils.data_loader import loadData
+from utils.evaluate import evaluate_and_plot
 
-# -----------------------------------------------------------------
-# START: BASELINE IMPORTS 
-# -----------------------------------------------------------------
-# Baseline A: TF-IDF + Logistic Regression
-from baseline.model_baseline_A import train_tfidf_logreg_model 
-# Baseline B: Bi-LSTM
-from baseline.model_baseline_B import train_bilstm_model 
-# Baseline D: TF-IDF + Naive Bayes (NEW)
-from baseline.model_baseline_NB import train_nb_model
-# Baseline E: TF-IDF + Random Forest (NEW)
-from baseline.model_baseline_RF import train_rf_model
-# -----------------------------------------------------------------
-# END: BASELINE IMPORTS
-# -----------------------------------------------------------------
+from baseline.model_baseline_B import BiLSTMClassifier
+from baseline.model_baseline_codebert import CodeBERTClassifier
+from baseline.model_baseline_svm import SVMClassifier
+from baseline.model_baseline_textcnn import TextCNNClassifier
 
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import RandomForestClassifier
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Configuration: TASK A Files ---
-# All models will use the full training and validation sets as inputs
-LABEL_TO_ID_PATH = './data/label_to_id.json'
-ID_TO_LABEL_PATH = './data/id_to_label.json'
-TRAIN_PARQUET_PATH = './data/task_a_training_set_1.parquet'
-VALID_PARQUET_PATH = './data/task_a_validation_set.parquet'
-# ------------------------------------
+# ---------------- MODEL REGISTRY ----------------
+MODEL_REGISTRY = {
+    'A': LogisticRegression(max_iter=2000, n_jobs=-1),
+    'B': BiLSTMClassifier,
+    'C': CodeBERTClassifier,
+    'D': MultinomialNB(),
+    'E': RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42),
+    'F': SVMClassifier,
+    'G': TextCNNClassifier,
+}
 
-class BaselineRunner:
-    def __init__(self, task_subset: str = 'A'):
-        self.task_subset = task_subset
-        
-        # 1. Load Data for TF-IDF Models (A, D, E)
-        # Loads X_train/X_val from separate parquet files (needed for clean TF-IDF fitting)
-        self.X_train_ML, self.y_train_ML, self.X_val_ML, self.y_val_ML = self.load_ml_data()
-        
-        # 2. Load Data for Bi-LSTM Model (B)
-        # Loads X_train/X_val from the single training file (splits 80/20 internally)
-        self.X_train_B, self.X_val_B, self.y_train_B, self.y_val_B, self.num_labels_B = self.load_bilstm_data()
+# ---------------- UNIFIED TRAIN FUNCTION ----------------
+def train_model(model_name, train_loader, val_loader, output_dir, num_labels=None, **kwargs):
+    start_time = time.time()
+    logger.info(f"\nTraining model: {model_name}")
+
+    # ---------------- PyTorch token models: BiLSTM/TextCNN ----------------
+    if model_name in ['B', 'G']:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+
+        vocab_size = kwargs.get('vocab_size', None)
+        if vocab_size is None:
+            raise ValueError("vocab_size must be provided for token-based models")
+        num_labels = kwargs.get('num_labels', 2)
+
+        if model_name == 'B':
+            model = BiLSTMClassifier(
+                vocab_size=vocab_size,
+                embedding_dim=100,
+                hidden_dim=128,
+                num_layers=2,
+                num_classes=num_labels
+            ).to(device)
+        elif model_name == 'G':
+            model = TextCNNClassifier(
+                vocab_size=vocab_size,
+                embedding_dim=100,
+                num_classes=num_labels
+            ).to(device)
+
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=kwargs.get('learning_rate', 1e-3))
+        best_f1 = 0.0
+        num_epochs = kwargs.get('epochs', 5)
+
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.time()
+            model.train()
+            pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{num_epochs}', unit='batch')
+
+            for sequences, labels in pbar:
+                sequences, labels = sequences.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = model(sequences)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+            # Validation
+            model.eval()
+            val_preds, val_true = [], []
+            with torch.no_grad():
+                for sequences, labels in val_loader:
+                    sequences, labels = sequences.to(device), labels.to(device)
+                    outputs = model(sequences)
+                    _, predicted = torch.max(outputs, 1)
+                    val_preds.extend(predicted.cpu().numpy())
+                    val_true.extend(labels.cpu().numpy())
+
+            macro_f1 = evaluate_and_plot(val_true, val_preds, output_dir, num_labels=num_labels, model_name=model_name)
+            logger.info(f"Epoch {epoch} finished. Macro F1: {macro_f1:.4f}. Time: {(time.time()-epoch_start)/60:.2f} mins")
+
+            if macro_f1 > best_f1:
+                best_f1 = macro_f1
+                torch.save(model.state_dict(), os.path.join(output_dir, f'{model_name}_best_model.pth'))
+
+        total_time = time.time() - start_time
+        logger.info(f"[{model_name}] Training complete. Best Macro F1: {best_f1:.4f}. Total time: {total_time/60:.2f} mins")
+        return best_f1
+
+    # ---------------- CodeBERT (C) ----------------
+    if model_name == 'C':
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = CodeBERTClassifier(num_labels=num_labels).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=kwargs.get('learning_rate', 1e-5))
+        criterion = nn.CrossEntropyLoss()
+        best_f1 = 0.0
+        num_epochs = kwargs.get('epochs', 3)
+
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.time()
+            model.train()
+            pbar = tqdm(train_loader, desc=f'CodeBERT Epoch {epoch}/{num_epochs}', unit='batch')
+
+            for input_ids, attn, labels in pbar:
+                input_ids, attn, labels = input_ids.to(device), attn.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = model(input_ids=input_ids, attention_mask=attn)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+            # Validation
+            model.eval()
+            preds, trues = [], []
+            with torch.no_grad():
+                for input_ids, attn, labels in val_loader:
+                    input_ids, attn, labels = input_ids.to(device), attn.to(device), labels.to(device)
+                    outputs = model(input_ids=input_ids, attention_mask=attn)
+                    _, predicted = torch.max(outputs, 1)
+                    preds.extend(predicted.cpu().numpy())
+                    trues.extend(labels.cpu().numpy())
+
+            macro_f1 = evaluate_and_plot(trues, preds, output_dir, num_labels=num_labels, model_name="CodeBERT")
+            logger.info(f"Epoch {epoch} finished. Macro F1: {macro_f1:.4f}. Time: {(time.time()-epoch_start)/60:.2f} mins")
+
+            if macro_f1 > best_f1:
+                best_f1 = macro_f1
+                torch.save(model.state_dict(), os.path.join(output_dir, 'codebert_best_model.pth'))
+
+        return best_f1
+
+    # ---------------- TFIDF ML MODELS ----------------
+    if isinstance(train_loader, tuple) and len(train_loader) == 2:
+        X_train_vec, y_train_vec = train_loader[0], train_loader[1]
+        X_val_vec, y_val_vec = val_loader[0], val_loader[1]
+    else:
+        X_train_vec, y_train_vec = train_loader
+        X_val_vec, y_val_vec = val_loader
+
+    model = MODEL_REGISTRY[model_name]
+    model.fit(X_train_vec, y_train_vec)
+    y_pred = model.predict(X_val_vec)
+
+    final_f1 = evaluate_and_plot(y_val_vec, y_pred, output_dir, num_labels=len(np.unique(np.concatenate((y_train_vec, y_val_vec)))), model_name=model_name)
+    logger.info(f"[{model_name}] Training complete. Macro F1: {final_f1:.4f}. Time: {(time.time()-start_time)/60:.2f} mins")
+    return final_f1
 
 
-    def load_ml_data(self):
-        """Loads data for TF-IDF based models (A, D, E)."""
-        logger.info("Loading ML (TF-IDF) data from separate Train/Val files...")
-        X_train, y_train, X_val, y_val = load_baselineA_datasets(
-            train_parquet_path=TRAIN_PARQUET_PATH,
-            valid_parquet_path=VALID_PARQUET_PATH
-        )
-        if X_train is None:
-            raise RuntimeError("Failed to load ML datasets. Check file paths.")
-        return X_train, y_train, X_val, y_val
-
-    def load_bilstm_data(self):
-        """Loads and splits data for Baseline B (Bi-LSTM)."""
-        logger.info("Loading Bi-LSTM data (single file, internal 80/20 split)...")
-        # Bi-LSTM loader splits the single training file into train/val internally.
-        X_train, X_val, y_train, y_val, num_labels = load_data_and_split(
-            parquet_path=TRAIN_PARQUET_PATH, # Using the large training file as input
-            label_to_id_path=LABEL_TO_ID_PATH,
-            id_to_label_path=ID_TO_LABEL_PATH,
-            test_size=0.2,          
-            random_state=42
-        )
-        if X_train is None:
-            raise RuntimeError("Failed to load Bi-LSTM data.")
-        return X_train, X_val, y_train, y_val, num_labels
-
-    # --- Baseline A: LogReg ---
-    def run_tfidf_logreg_baseline(self, output_dir: str):
-        """Runs Baseline A: TF-IDF + Logistic Regression"""
-        logger.info("\n--- Running Baseline A: TF-IDF + Logistic Regression ---")
-        macro_f1 = train_tfidf_logreg_model(self.X_train_ML, self.y_train_ML, self.X_val_ML, self.y_val_ML, output_dir)
-        logger.info(f"[Baseline A] Final Macro F1: {macro_f1:.4f}")
-        return macro_f1
-    
-    # --- Baseline D: Naive Bayes ---
-    def run_nb_baseline(self, output_dir: str):
-        """Runs Baseline D: TF-IDF + Naive Bayes"""
-        logger.info("\n--- Running Baseline D: TF-IDF + Naive Bayes ---")
-        macro_f1 = train_nb_model(self.X_train_ML, self.y_train_ML, self.X_val_ML, self.y_val_ML, output_dir)
-        logger.info(f"[Baseline D] Final Macro F1: {macro_f1:.4f}")
-        return macro_f1
-
-    # --- Baseline E: Random Forest ---
-    def run_rf_baseline(self, output_dir: str):
-        """Runs Baseline E: TF-IDF + Random Forest"""
-        logger.info("\n--- Running Baseline E: TF-IDF + Random Forest ---")
-        macro_f1 = train_rf_model(self.X_train_ML, self.y_train_ML, self.X_val_ML, self.y_val_ML, output_dir)
-        logger.info(f"[Baseline E] Final Macro F1: {macro_f1:.4f}")
-        return macro_f1
-
-
-    # --- Baseline B: Bi-LSTM ---
-    def run_bilstm_baseline(self, output_dir: str, **kwargs):
-        """Runs Baseline B: Bi-LSTM"""
-        logger.info("\n--- Running Baseline B: Bi-LSTM Model ---")
-        
-        preprocessor = BiLSTMPreprocessor()
-        
-        final_f1 = train_bilstm_model(
-            preprocessor=preprocessor,
-            X_train=self.X_train_B,
-            y_train=self.y_train_B,
-            X_val=self.X_val_B,
-            y_val=self.y_val_B,
-            num_labels=self.num_labels_B,
-            output_dir=output_dir,
-            **kwargs 
-        )
-        logger.info(f"[Baseline B] Final Macro F1: {final_f1:.4f}")
-        return final_f1
-
-
+# ---------------- MAIN ----------------
 def main():
-    parser = argparse.ArgumentParser(description='Run Baselines for SemEval-2026-Task13')
-    parser.add_argument('--task', choices=['A'], default='A', help='Task subset to use (currently only A supported)')
-    parser.add_argument('--output_dir', default='./results', help='Output directory for weights and metrics')
-    
-    # Add a flag to select which model to run
-    parser.add_argument('--model', choices=['A', 'B', 'D', 'E', 'all'], default='B', 
-                        help='Specify which model to run (A: LogReg, B: BiLSTM, D: NB, E: RF, all: Run all models). Default is B.')
-    
-    # Bi-LSTM specific arguments
-    parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs for Bi-LSTM')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for Bi-LSTM')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for Bi-LSTM')
-    
+    parser = argparse.ArgumentParser(description='Unified Baseline Trainer for SemEval Task13')
+    parser.add_argument('--output_dir', default='./results')
+    parser.add_argument('--model', choices=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'all'], default='B')
+    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--learning_rate', type=float, default=1e-3)
     args = parser.parse_args()
-    
-    # Create necessary output folders
+
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, 'plots'), exist_ok=True)
 
-    try:
-        runner = BaselineRunner(task_subset=args.task)
-        
-        model_selection = args.model.lower()
-        
-        if model_selection == 'a' or model_selection == 'all':
-            runner.run_tfidf_logreg_baseline(args.output_dir)
+    # ---------------- Load data ----------------
+    train_loader_tfidf, val_loader_tfidf, _ = loadData("tfidf-pytorch", batch_size=args.batch_size, max_features=2000)
+    train_loader_token, val_loader_token = loadData("tokenization", batch_size=args.batch_size)
+    train_loader_codebert, val_loader_codebert = loadData("codeBert", batch_size=args.batch_size)
 
-        if model_selection == 'd' or model_selection == 'all':
-            runner.run_nb_baseline(args.output_dir)
+    models_to_run = [args.model] if args.model != 'all' else list(MODEL_REGISTRY.keys())
 
-        if model_selection == 'e' or model_selection == 'all':
-            runner.run_rf_baseline(args.output_dir)
+    for m in models_to_run:
+        logger.info(f"Estimated time for model {m}: ~5 mins approx")
+        if m in ['B', 'G']:
+            vocab_size = len(train_loader_token.dataset.tokenizer.vocab)
+            train_model(m, train_loader_token, val_loader_token, args.output_dir, vocab_size=vocab_size, num_labels=2, epochs=args.epochs, learning_rate=args.learning_rate)
+        elif m == 'C':
+            train_model(m, train_loader_codebert, val_loader_codebert, args.output_dir, num_labels=2, epochs=args.epochs, learning_rate=args.learning_rate)
+        else:
+            train_model(m, train_loader_tfidf, val_loader_tfidf, args.output_dir)
 
-        if model_selection == 'b' or model_selection == 'all':
-            bilstm_params = {
-                'num_epochs': args.epochs,
-                'batch_size': args.batch_size,
-                'learning_rate': args.learning_rate
-            }
-            runner.run_bilstm_baseline(args.output_dir, **bilstm_params)
-
-        logger.info("\n=== Assignment 2 Baseline Execution Complete! ===")
-        
-    except RuntimeError as e:
-        logger.error(f"Critical error: {e}")
-        exit(1)
 
 if __name__ == '__main__':
     main()
-
 #to activate the virtual environment use
 #.\venv_311\Scripts\Activate.ps1
