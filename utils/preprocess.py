@@ -43,7 +43,7 @@ def fit_vectorizer(train_texts, max_features=20000):
     return vectorizer
 
 def transform_texts(vectorizer, texts):
-    """Transforms texts → TF-IDF and returns sparse matrix (no dense conversion)."""
+    """Transforms texts → TF-IDF and returns sparse matrix (no dense conversion)."""    
     return vectorizer.transform(texts)
 
 
@@ -55,15 +55,13 @@ def preprocess_tfidf(train_path, val_path, save_dir="vectorizer", max_features=2
     train_df = load_parquet(train_path)
     val_df = load_parquet(val_path)
 
-    train_texts, train_labels = extract_xy(train_df)
-    val_texts, val_labels = extract_xy(val_df)
-
     # optionally sample for quick iteration
     if sample_size is not None:
-        train_texts = train_texts[:sample_size]
-        train_labels = train_labels[:sample_size]
-        val_texts = val_texts[:sample_size]
-        val_labels = val_labels[:sample_size]
+       train_df = train_df.head(sample_size)
+       val_df = val_df.head(sample_size)
+
+    train_texts, train_labels = extract_xy(train_df)
+    val_texts, val_labels = extract_xy(val_df)
 
     vectorizer = fit_vectorizer(train_texts, max_features=max_features)
 
@@ -84,7 +82,7 @@ def preprocess_tfidf(train_path, val_path, save_dir="vectorizer", max_features=2
 # TF-IDF preprocessing
 # FOR PYTORCHHH
 # =============================
-
+'''
 def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer", max_features=20000, sample_size=None):
     """
     Load train/val parquet → TF-IDF → tensors.
@@ -117,7 +115,7 @@ def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer", max_fe
 
     # Return as sparse matrices + numpy labels for the loader to handle
     return (X_train, y_train), (X_val, y_val), vectorizer
-
+'''
 
 
 # =============================

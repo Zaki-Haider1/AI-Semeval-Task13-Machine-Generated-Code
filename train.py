@@ -353,7 +353,7 @@ def main():
     parser = argparse.ArgumentParser(description='Unified Baseline Trainer for SemEval Task13')
     parser.add_argument('--output_dir', default='./results')
     parser.add_argument('--model', type=str, default='B',help="Comma-separated model(s) e.g., B,G,F or 'all'")
-    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--max_features', type=int, default=20000, help='Max features for TF-IDF vectorizer')
@@ -375,7 +375,7 @@ def main():
         if m in ['A','D','E','F'] and not tfidf_loaded:
             logger.info("Loading TF-IDF data (sparse) ...")
             train_loader_tfidf, val_loader_tfidf, _ = loadData(
-                "tfidf", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
+                "tfidf-sklearn", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
             )
             tfidf_loaded = True
 
