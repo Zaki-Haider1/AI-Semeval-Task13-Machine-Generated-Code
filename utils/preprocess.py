@@ -208,7 +208,7 @@ def preprocess_tokenized(train_path, val_path, batch_size=32, min_freq=1, sample
 # CODE BERT TOKENIZATION 
 # FOR PYTORCH
 
-def preprocess_codebert(train_path, val_path, max_length=256):
+def preprocess_codebert(train_path, val_path, batch_size=32, max_length=256, sample_size=None):
     # Lazy import to avoid heavy transformers import at module import time
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
@@ -216,10 +216,18 @@ def preprocess_codebert(train_path, val_path, max_length=256):
     def load_data(path):
         df = pd.read_parquet(path)
         texts = df["code"].astype(str).tolist()
-        labels = torch.tensor(df["label"].astype(int).tolist(), dtype=torch.long)
+        labels = df["label"].astype(int).tolist()
+
+        # optionally sample for quick iteration
+        if sample_size is not None:
+            texts = texts[:sample_size]
+            labels = labels[:sample_size]
+
+        # encode and return tensors
         encodings = tokenizer(texts, truncation=True, padding='max_length',
                               max_length=max_length, return_tensors='pt')
-        return encodings, labels
+        labels_tensor = torch.tensor(labels, dtype=torch.long)
+        return encodings, labels_tensor
 
     train_encodings, y_train = load_data(train_path)
     val_encodings, y_val = load_data(val_path)
@@ -228,4 +236,8 @@ def preprocess_codebert(train_path, val_path, max_length=256):
     train_dataset = TensorDataset(train_encodings['input_ids'], train_encodings['attention_mask'], y_train)
     val_dataset   = TensorDataset(val_encodings['input_ids'], val_encodings['attention_mask'], y_val)
 
-    return train_dataset, val_dataset, tokenizer
+    # Create DataLoaders so callers get batches (consistent with tokenization loader)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, tokenizer

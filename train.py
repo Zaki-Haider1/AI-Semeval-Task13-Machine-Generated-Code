@@ -284,7 +284,7 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
     if model_name == 'C':
         num_labels = kwargs.get('num_labels', 2)
         num_epochs = kwargs.get('epochs', 3)
-        model = CodeBERTClassifier(num_labels=num_labels).to(device)
+        model = CodeBERTClassifier(num_classes=num_labels).to(device)
         optimizer = optim.Adam(model.parameters(), lr=kwargs.get('learning_rate', 1e-5))
         criterion = nn.CrossEntropyLoss()
         best_f1 = 0.0
@@ -356,7 +356,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--learning_rate', type=float, default=1e-3)
-    parser.add_argument('--max_features', type=int, default=20000, help='Max features for TF-IDF vectorizer')
+    parser.add_argument('--max_features', type=int, default=30000, help='Max features for TF-IDF vectorizer')
     parser.add_argument('--sample_size', type=int, default=None, help='Optional: run on a small sample of the dataset for quick iteration')
     args = parser.parse_args()
 
@@ -371,27 +371,40 @@ def main():
     token_loaded = False
     codebert_loaded = False
 
-    for m in models_to_run:
-        if m in ['A','D','E','F'] and not tfidf_loaded:
-            logger.info("Loading TF-IDF data (sparse) ...")
-            train_loader_tfidf, val_loader_tfidf, _ = loadData(
-                "tfidf-sklearn", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
-            )
-            tfidf_loaded = True
 
-        if m in ['B','G'] and not token_loaded:
-            logger.info("Loading tokenized data ...")
-            train_loader_token, val_loader_token = loadData(
-                "tokenization", batch_size=args.batch_size, sample_size=args.sample_size
-            )
-            token_loaded = True
+# WHENEVER YOU RUN ANY MODEL MAKE SURE THE DATA 
+# IS BEING LOADAD ACC TO WHAT YOU WANT BY CHANGING 
+# THE MODE IN THE loadData FUNCTION
 
-        if m == 'C' and not codebert_loaded:
-            logger.info("Loading CodeBERT data ...")
-            train_loader_codebert, val_loader_codebert = loadData(
-                "codeBert", batch_size=args.batch_size, sample_size=args.sample_size
-            )
-            codebert_loaded = True
+    # 3 Available Modes:
+    # tfidf-sklearn (sparse)
+    # tokenization (PyTorch DataLoader (tokenization))
+    # codeBert (PyTorch DataLoader(codebert specifiz tokenization))
+    train_loader , val_loader, vectorizerORtokenizerORWhatever = loadData(
+        "codeBert", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
+    )
+
+    #for m in models_to_run:
+     #   if m in ['A','D','E','F'] and not tfidf_loaded:
+      #      logger.info("Loading TF-IDF data (sparse) ...")
+       #     train_loader_tfidf, val_loader_tfidf, _ = loadData(
+        #        "tfidf-sklearn", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
+         #   )
+          #  tfidf_loaded = True
+
+        #if m in ['B','G'] and not token_loaded:
+         #   logger.info("Loading tokenized data ...")
+          #  train_loader_token, val_loader_token = loadData(
+           #     "tokenization", batch_size=args.batch_size, sample_size=args.sample_size
+            #)
+            #token_loaded = True
+
+        #if m == 'C' and not codebert_loaded:
+         #   logger.info("Loading CodeBERT data ...")
+          #  train_loader_codebert, val_loader_codebert = loadData(
+           #     "codeBert", batch_size=args.batch_size, sample_size=args.sample_size
+            #)
+            #codebert_loaded = True
 
     # Train each model
     for m in models_to_run:
@@ -407,7 +420,7 @@ def main():
         est_seconds = None
         try:
             if m in ['B', 'G']:
-                vocab_size = len(train_loader_token.dataset.tokenizer.vocab)
+                vocab_size = len(train_loader.dataset.tokenizer.vocab)
 
                 # build a small factory to create the model with same args
                 if m == 'B':
@@ -416,11 +429,11 @@ def main():
                 else:
                     model_factory = lambda: TextCNNClassifier(vocab_size=vocab_size, embedding_dim=100, num_classes=2)
 
-                est_seconds = estimate_pytorch_time(model_factory, train_loader_token, device, epochs=args.epochs)
+                est_seconds = estimate_pytorch_time(model_factory, train_loader, device, epochs=args.epochs)
                 logger.info(f"Estimated time for model {m}: ~{_format_seconds(est_seconds)}")
 
                 train_model(
-                    m, train_loader_token, val_loader_token, args.output_dir,
+                    m, train_loader, val_loader, args.output_dir,
                     vocab_size=vocab_size, num_labels=2, epochs=args.epochs,
                     learning_rate=args.learning_rate
                 )
@@ -428,43 +441,43 @@ def main():
             elif m == 'C':
                 # CodeBERT: device-aware estimate
                 model_factory = lambda: CodeBERTClassifier(num_labels=2)
-                est_seconds = estimate_pytorch_time(model_factory, train_loader_codebert, device, epochs=args.epochs)
+                est_seconds = estimate_pytorch_time(model_factory, train_loader, device, epochs=args.epochs)
                 logger.info(f"Estimated time for model {m}: ~{_format_seconds(est_seconds)}")
 
                 train_model(
-                    m, train_loader_codebert, val_loader_codebert, args.output_dir,
+                    m, train_loader, val_loader, args.output_dir,
                     num_labels=2, epochs=args.epochs, learning_rate=args.learning_rate
                 )
 
             else:
                 # sklearn TF-IDF models: extract sparse arrays
                 try:
-                    (X_train_vec, y_train_vec), _ = train_loader_tfidf, val_loader_tfidf
+                    (X_train_vec, y_train_vec), _ = train_loader, val_loader
                 except Exception:
-                    (X_train_vec, y_train_vec) = train_loader_tfidf
+                    (X_train_vec, y_train_vec) = train_loader
 
                 est_seconds = estimate_sklearn_time(MODEL_REGISTRY[m], X_train_vec, y_train_vec)
                 logger.info(f"Estimated time for model {m}: ~{_format_seconds(est_seconds)} (sklearn, cpu)")
 
-                train_model(m, train_loader_tfidf, val_loader_tfidf, args.output_dir)
+                train_model(m, train_loader, val_loader, args.output_dir)
 
         except Exception as e:
             logger.warning(f"Could not compute precise ETA for model {m}: {e}")
             # still run the model
             if m in ['B','G']:
-                vocab_size = len(train_loader_token.dataset.tokenizer.vocab)
+                vocab_size = len(train_loader.dataset.tokenizer.vocab)
                 train_model(
-                    m, train_loader_token, val_loader_token, args.output_dir,
+                    m, train_loader, val_loader, args.output_dir,
                     vocab_size=vocab_size, num_labels=2, epochs=args.epochs,
                     learning_rate=args.learning_rate
                 )
             elif m == 'C':
                 train_model(
-                    m, train_loader_codebert, val_loader_codebert, args.output_dir,
+                    m, train_loader, val_loader, args.output_dir,
                     num_labels=2, epochs=args.epochs, learning_rate=args.learning_rate
                 )
             else:
-                train_model(m, train_loader_tfidf, val_loader_tfidf, args.output_dir)
+                train_model(m, train_loader, val_loader, args.output_dir)
 
 if __name__ == '__main__':
     main()

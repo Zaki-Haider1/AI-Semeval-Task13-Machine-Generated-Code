@@ -3,6 +3,9 @@ import time
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from .preprocess import preprocess_tokenized, preprocess_codebert, preprocess_tfidf
+import os
+from torch.utils.data import DataLoader, TensorDataset
+
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ if mode == "tfidf-pytorch":
 
 
 
-def loadData(mode="tfidf", batch_size=32, max_features=2000, sample_size=None):
+def loadData(mode="tfidf", batch_size=32, max_features=20000, sample_size=None):
     """Load data in several modes:
       - tfidf
       - tfidf-pytorch
@@ -80,9 +83,19 @@ def loadData(mode="tfidf", batch_size=32, max_features=2000, sample_size=None):
       - codeBert
     """
 
-    train_path = "data/task_a_training_Set_1.parquet"
+    print(f"Loading data with mode={mode}, batch_size={batch_size}, max_features={max_features}, sample_size={sample_size}")
+
+    #BATCHSIZE = 32
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # utils/
+    DATA_DIR = os.path.join(BASE_DIR, "..", "data")        # parent/data
+    DATA_DIR = os.path.abspath(DATA_DIR)                   # normalize path
+
+    train_path = os.path.join(DATA_DIR, "task_a_training_set_1.parquet")
+    val_path   = os.path.join(DATA_DIR, "task_a_validation_set.parquet")
+
+   #train_path = "data/task_a_training_Set_1.parquet"
    #val_path = "data/task_a_validation_set.parquet"
-    val_path = "data/task_a_test_set_sample.parquet"
+   #val_path = "data/task_a_test_set_sample.parquet"
 
     # ====================== ACTIVE WORKING CODE ======================
 
@@ -113,13 +126,14 @@ def loadData(mode="tfidf", batch_size=32, max_features=2000, sample_size=None):
         except Exception:
             pass
 
+        # Return only loaders (tokenizer available via dataset.tokenizer)
         return train_loader, val_loader
 
     if mode == "codeBert":
         logger.info("Starting CodeBERT preprocessing")
         t0 = time.perf_counter()
 
-        train_loader, val_loader = preprocess_codebert(
+        train_loader, val_loader, tokenizer = preprocess_codebert(
             train_path, val_path, batch_size=batch_size, sample_size=sample_size
         )
 
@@ -128,6 +142,7 @@ def loadData(mode="tfidf", batch_size=32, max_features=2000, sample_size=None):
             f"train_batches={len(train_loader)}, val_batches={len(val_loader)}"
         )
 
+        # Return only loaders (tokenizer returned only for internal use)
         return train_loader, val_loader
 
     raise ValueError(f"Unknown data mode: {mode}")
