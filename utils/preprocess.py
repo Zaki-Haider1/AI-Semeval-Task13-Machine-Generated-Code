@@ -4,7 +4,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import joblib
 import os
 from torch.nn.utils.rnn import pad_sequence
-from transformers import AutoTokenizer
 import torch
 import pandas as pd
 from torch.utils.data import TensorDataset
@@ -44,12 +43,11 @@ def fit_vectorizer(train_texts, max_features=20000):
     return vectorizer
 
 def transform_texts(vectorizer, texts):
-    """Transforms texts → TF-IDF → tensor."""
-    X = vectorizer.transform(texts).toarray()
-    return torch.tensor(X, dtype=torch.float32)
+    """Transforms texts → TF-IDF and returns sparse matrix (no dense conversion)."""
+    return vectorizer.transform(texts)
 
 
-def preprocess_tfidf(train_path, val_path, save_dir="vectorizer"):
+def preprocess_tfidf(train_path, val_path, save_dir="vectorizer", max_features=20000, sample_size=None):
     """
     Load train/val parquet → TF-IDF → NumPy arrays.
     Saves vectorizer for future inference.
@@ -60,7 +58,14 @@ def preprocess_tfidf(train_path, val_path, save_dir="vectorizer"):
     train_texts, train_labels = extract_xy(train_df)
     val_texts, val_labels = extract_xy(val_df)
 
-    vectorizer = fit_vectorizer(train_texts)
+    # optionally sample for quick iteration
+    if sample_size is not None:
+        train_texts = train_texts[:sample_size]
+        train_labels = train_labels[:sample_size]
+        val_texts = val_texts[:sample_size]
+        val_labels = val_labels[:sample_size]
+
+    vectorizer = fit_vectorizer(train_texts, max_features=max_features)
 
     # Save vectorizer
     os.makedirs(save_dir, exist_ok=True)
@@ -72,14 +77,15 @@ def preprocess_tfidf(train_path, val_path, save_dir="vectorizer"):
     y_train = np.array(train_labels)
     y_val = np.array(val_labels)
 
-    return X_train, y_train, X_val, y_val, vectorizer
+    # Return in the ((X_train,y_train),(X_val,y_val), vectorizer) shape
+    return (X_train, y_train), (X_val, y_val), vectorizer
 
 # =============================
 # TF-IDF preprocessing
 # FOR PYTORCHHH
 # =============================
 
-def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer"):
+def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer", max_features=20000, sample_size=None):
     """
     Load train/val parquet → TF-IDF → tensors.
     Saves vectorizer for future inference.
@@ -90,7 +96,14 @@ def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer"):
     train_texts, train_labels = extract_xy(train_df)
     val_texts, val_labels = extract_xy(val_df)
 
-    vectorizer = fit_vectorizer(train_texts)
+    # optionally sample for quick iteration
+    if sample_size is not None:
+        train_texts = train_texts[:sample_size]
+        train_labels = train_labels[:sample_size]
+        val_texts = val_texts[:sample_size]
+        val_labels = val_labels[:sample_size]
+
+    vectorizer = fit_vectorizer(train_texts, max_features=max_features)
 
     # Save vectorizer
     os.makedirs(save_dir, exist_ok=True)
@@ -99,10 +112,11 @@ def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer"):
     X_train = transform_texts(vectorizer, train_texts)
     X_val = transform_texts(vectorizer, val_texts)
 
-    y_train = torch.tensor(train_labels, dtype=torch.float32)
-    y_val = torch.tensor(val_labels, dtype=torch.float32)
+    y_train = np.array(train_labels)
+    y_val = np.array(val_labels)
 
-    return X_train, y_train, X_val, y_val, vectorizer
+    # Return as sparse matrices + numpy labels for the loader to handle
+    return (X_train, y_train), (X_val, y_val), vectorizer
 
 
 
@@ -138,38 +152,73 @@ def tokenize_and_pad(texts, tokenizer):
     padded = pad_sequence(seqs, batch_first=True, padding_value=tokenizer.vocab["<PAD>"])
     return padded
 
-def preprocess_tokenized(train_path, val_path, min_freq=1):
+def preprocess_tokenized(train_path, val_path, batch_size=32, min_freq=1, sample_size=None):
     """
-    Reads parquet train + val files, builds vocab on train, tokenizes and pads sequences.
-    Returns:
-        X_train, y_train, X_val, y_val: tensors
-        tokenizer: fitted tokenizer object
+    Reads parquet train + val files, builds vocab on train, tokenizes sequences and
+    returns PyTorch DataLoaders with per-batch padding. Also returns the tokenizer.
+
+    Returns: train_loader, val_loader, tokenizer
     """
-    train_texts, train_labels = extract_xy(load_parquet(train_path))
-    val_texts, val_labels = extract_xy(load_parquet(val_path))
+    # load dataframes
+    train_df = load_parquet(train_path)
+    val_df = load_parquet(val_path)
+
+    train_texts, train_labels = extract_xy(train_df)
+    val_texts, val_labels = extract_xy(val_df)
+
+    # optionally sample for quick iteration
+    if sample_size is not None:
+        train_texts = train_texts[:sample_size]
+        train_labels = train_labels[:sample_size]
+        val_texts = val_texts[:sample_size]
+        val_labels = val_labels[:sample_size]
 
     tokenizer = Tokenizer(min_freq=min_freq)
     tokenizer.build_vocab(train_texts)
 
-    X_train = tokenize_and_pad(train_texts, tokenizer)
-    y_train = torch.tensor(train_labels, dtype=torch.float32)
+    # dataset that returns variable-length tensors
+    class TextDataset(torch.utils.data.Dataset):
+        def __init__(self, texts, labels, tokenizer):
+            self.texts = texts
+            self.labels = labels
+            self.tokenizer = tokenizer
 
-    X_val = tokenize_and_pad(val_texts, tokenizer)
-    y_val = torch.tensor(val_labels, dtype=torch.float32)
+        def __len__(self):
+            return len(self.texts)
 
-    return X_train, y_train, X_val, y_val, tokenizer
+        def __getitem__(self, idx):
+            t = self.texts[idx]
+            ids = self.tokenizer.text_to_ids(t)
+            lbl = int(self.labels[idx])
+            return ids, torch.tensor(lbl, dtype=torch.long)
+
+    def collate_fn(batch):
+        seqs, labs = zip(*batch)
+        padded = pad_sequence(seqs, batch_first=True, padding_value=tokenizer.vocab["<PAD>"])
+        labels = torch.stack(labs)
+        return padded, labels
+
+    train_dataset = TextDataset(train_texts, train_labels, tokenizer)
+    val_dataset = TextDataset(val_texts, val_labels, tokenizer)
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    return train_loader, val_loader, tokenizer
 
 
 # CODE BERT TOKENIZATION 
 # FOR PYTORCH
 
 def preprocess_codebert(train_path, val_path, max_length=256):
+    # Lazy import to avoid heavy transformers import at module import time
+    from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
 
     def load_data(path):
         df = pd.read_parquet(path)
         texts = df["code"].astype(str).tolist()
-        labels = torch.tensor(df["label"].astype(int).tolist(), dtype=torch.float32)
+        labels = torch.tensor(df["label"].astype(int).tolist(), dtype=torch.long)
         encodings = tokenizer(texts, truncation=True, padding='max_length',
                               max_length=max_length, return_tensors='pt')
         return encodings, labels
