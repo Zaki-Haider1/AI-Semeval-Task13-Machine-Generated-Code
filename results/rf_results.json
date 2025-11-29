@@ -1,6 +1,0 @@
-{
-    "model": "Random Forest (TF-IDF)",
-    "macro_f1": 0.9088572429315986,
-    "features": "TF-IDF",
-    "n_estimators": 100
-}

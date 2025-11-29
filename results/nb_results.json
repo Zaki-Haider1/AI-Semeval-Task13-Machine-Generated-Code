@@ -1,5 +1,0 @@
-{
-    "model": "Naive Bayes (TF-IDF)",
-    "macro_f1": 0.8108707012797478,
-    "features": "TF-IDF"
-}
