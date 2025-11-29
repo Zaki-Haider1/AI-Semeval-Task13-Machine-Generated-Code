@@ -2,7 +2,7 @@ import logging
 import time
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-from .preprocess import preprocess_tokenized, preprocess_codebert, preprocess_tfidf
+from .preprocess import preprocess_tokenized, preprocess_codebert, preprocess_tfidf,modified_tfidf
 import os
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -91,7 +91,7 @@ def loadData(mode="tfidf", batch_size=32, max_features=20000, sample_size=None):
     DATA_DIR = os.path.abspath(DATA_DIR)                   # normalize path
 
     train_path = os.path.join(DATA_DIR, "task_a_training_set_1.parquet")
-    val_path   = os.path.join(DATA_DIR, "task_a_validation_set.parquet")
+    val_path   = os.path.join(DATA_DIR, "task_a_test_set_sample.parquet")
 
    #train_path = "data/task_a_training_Set_1.parquet"
    #val_path = "data/task_a_validation_set.parquet"
@@ -104,6 +104,14 @@ def loadData(mode="tfidf", batch_size=32, max_features=20000, sample_size=None):
             train_path, val_path, max_features=max_features, sample_size=sample_size
         )
         return (X_train, y_train), (X_val, y_val), vectorizer
+
+    if mode == "modified-tfidf-sklearn":
+        (X_train, y_train), (X_val, y_val), vectorizer =  modified_tfidf(
+            train_path, val_path, max_token_features=max_features, sample_size=sample_size
+        )
+        return (X_train, y_train), (X_val, y_val), vectorizer
+
+
 
     if mode == "tokenization":
         logger.info("Starting tokenization preprocessing")

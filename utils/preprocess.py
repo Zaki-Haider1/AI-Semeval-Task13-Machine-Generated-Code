@@ -37,7 +37,8 @@ def fit_vectorizer(train_texts, max_features=20000):
     """Fits TF-IDF on training texts only."""
     vectorizer = TfidfVectorizer(
         max_features=max_features,
-        token_pattern=r"(?u)\b\w+\b"   # handles code tokens better
+        token_pattern=r"(?u)\b\w+\b",  # handles code tokens better
+        ngram_range=(1, 2)
     )
     vectorizer.fit(train_texts)
     return vectorizer
@@ -47,7 +48,7 @@ def transform_texts(vectorizer, texts):
     return vectorizer.transform(texts)
 
 
-def preprocess_tfidf(train_path, val_path, save_dir="vectorizer", max_features=20000, sample_size=None):
+def preprocess_tfidf(train_path, val_path, save_dir="vectorizer", max_features=30000, sample_size=None):
     """
     Load train/val parquet → TF-IDF → NumPy arrays.
     Saves vectorizer for future inference.
@@ -116,6 +117,86 @@ def preprocess_tfidf_pyTorch(train_path, val_path, save_dir="vectorizer", max_fe
     # Return as sparse matrices + numpy labels for the loader to handle
     return (X_train, y_train), (X_val, y_val), vectorizer
 '''
+
+
+
+# =============================
+# Modified TF-IDF preprocessing
+# Combines token-level + char-level + optional code stats
+# =============================
+def modified_tfidf(train_path, val_path, save_dir="vectorizer", 
+                   max_token_features=20000, max_char_features=10000, 
+                   include_code_stats=True, sample_size=None):
+    """
+    Load train/val parquet → combined TF-IDF (tokens + char-level) → NumPy arrays.
+    Saves vectorizers for future inference.
+    """
+    from scipy.sparse import hstack
+    
+    train_df = load_parquet(train_path)
+    val_df = load_parquet(val_path)
+
+    # optionally sample for quick iteration
+    if sample_size is not None:
+        train_df = train_df.head(sample_size)
+        val_df = val_df.head(sample_size)
+
+    train_texts, train_labels = extract_xy(train_df)
+    val_texts, val_labels = extract_xy(val_df)
+
+    # ----- Token-level TF-IDF -----
+    token_vectorizer = TfidfVectorizer(
+        max_features=max_token_features,
+        token_pattern=r"(?u)\b\w+\b",
+        ngram_range=(1, 2)
+    )
+    token_vectorizer.fit(train_texts)
+    X_train_token = token_vectorizer.transform(train_texts)
+    X_val_token   = token_vectorizer.transform(val_texts)
+
+    # ----- Character-level TF-IDF -----
+    char_vectorizer = TfidfVectorizer(
+        analyzer='char',
+        ngram_range=(3, 6),
+        max_features=max_char_features
+    )
+    char_vectorizer.fit(train_texts)
+    X_train_char = char_vectorizer.transform(train_texts)
+    X_val_char   = char_vectorizer.transform(val_texts)
+
+    # ----- Combine features -----
+    X_train_combined = hstack([X_train_token, X_train_char])
+    X_val_combined   = hstack([X_val_token, X_val_char])
+
+    # ----- Optional code statistics -----
+    if include_code_stats:
+        def code_stats(df_texts):
+            stats = []
+            for t in df_texts:
+                lines = t.split("\n")
+                num_lines = len(lines)
+                avg_line_len = np.mean([len(l) for l in lines]) if lines else 0
+                stats.append([num_lines, avg_line_len])
+            return np.array(stats)
+        
+        train_stats = code_stats(train_texts)
+        val_stats = code_stats(val_texts)
+        from scipy.sparse import csr_matrix
+        X_train_combined = hstack([X_train_combined, csr_matrix(train_stats)])
+        X_val_combined   = hstack([X_val_combined, csr_matrix(val_stats)])
+
+    # Save vectorizers
+    os.makedirs(save_dir, exist_ok=True)
+    joblib.dump(token_vectorizer, f"{save_dir}/token_tfidf.pkl")
+    joblib.dump(char_vectorizer, f"{save_dir}/char_tfidf.pkl")
+
+    y_train = np.array(train_labels)
+    y_val   = np.array(val_labels)
+
+    return (X_train_combined, y_train), (X_val_combined, y_val), (token_vectorizer, char_vectorizer)
+
+
+
 
 
 # =============================

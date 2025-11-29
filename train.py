@@ -20,12 +20,24 @@ from baseline.model_baseline_textcnn import TextCNNClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score
+import numpy as np
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
+
+from sklearn.metrics import f1_score
+import numpy as np
+
+
+
+
+
 ### TIME ESTIMATION UTILITIES ###
+
 def estimate_sklearn_time(model, X_train, y_train):
     """Estimate sklearn model fit+predict time by timing on a small sample and scaling.
     Returns estimated seconds.
@@ -127,6 +139,9 @@ def estimate_sklearn_time(model, X_train, y_train):
 
     # conservative buffer
     return est_seconds * 1.25
+
+
+
 def estimate_pytorch_time(model_factory, train_loader, device, epochs=1, max_batches=5):
     """Estimate PyTorch training time by running a few batches and scaling.
     model_factory: callable -> model instance already moved to device
@@ -199,9 +214,31 @@ def _format_seconds(sec: float) -> str:
 
 ### TIME ESTIMATION UTILITIES END###
 
+
+
+
+def find_best_threshold(model, X_val, y_val):
+    probs = model.predict_proba(X_val)[:, 1]
+    thresholds = np.linspace(0, 1, 101)
+
+    best_f1 = -1
+    best_t = 0.5
+
+    for t in thresholds:
+        preds = (probs >= t).astype(int)
+        f1 = f1_score(y_val, preds, average="macro")
+        if f1 > best_f1:
+            best_f1 = f1
+            best_t = t
+
+    return best_t, best_f1
+
+
+
+
 # ---------------- MODEL REGISTRY ----------------
 MODEL_REGISTRY = {
-    'A': LogisticRegression(max_iter=2000, n_jobs=-1),
+    'A': LogisticRegression(max_iter=2000, n_jobs=-1,class_weight='balanced'),
     'B': BiLSTMClassifier,
     'C': CodeBERTClassifier,
     'D': MultinomialNB(),
@@ -241,6 +278,13 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
                 num_classes=num_labels
             ).to(device)
 
+
+
+
+
+
+
+
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=kwargs.get('learning_rate', 1e-3))
         best_f1 = 0.0
@@ -257,6 +301,12 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
                 loss.backward()
                 optimizer.step()
                 pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+
+
+
+
+
 
             # Validation
             model.eval()
@@ -322,8 +372,23 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
 
         return best_f1
 
+
+
+
+
+
+
+
+
+
     # ---------------- TFIDF ML MODELS ----------------
     # train_loader/val_loader expected as tuples: (X_train, y_train), (X_val, y_val)
+
+
+
+
+
+    
     if isinstance(train_loader, tuple) and len(train_loader) == 2:
         X_train_vec, y_train_vec = train_loader
         X_val_vec, y_val_vec = val_loader
@@ -337,6 +402,66 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
         except Exception as e:
             raise RuntimeError("Unable to unpack TF-IDF training data") from e
 
+
+
+
+
+# ***************** THRESHOLD TUNING AND EVALUATION FOR TFIDF MODELS *****************
+
+    model = MODEL_REGISTRY[model_name]
+    logger.info(f"Training {model_name} (sparse TF-IDF ML model)...")
+    start = time.time()
+
+    # ---- TRAIN ----
+    model.fit(X_train_vec, y_train_vec)
+
+    # ---- FIND BEST THRESHOLD ON VALIDATION ----
+    if hasattr(model, "predict_proba"):   # LogisticRegression, NB, RF, SVM(prob) etc.
+      
+      
+        best_t, best_f1 = find_best_threshold(model, X_val_vec, y_val_vec)
+        logger.info(f"Best threshold={best_t:.3f}  Best macro-F1={best_f1:.4f}")
+
+
+        from sklearn.metrics import precision_recall_curve
+
+        # ANOTHER WAY TO FIND BEST THRESHOLD
+        # This is Giving a worse F1 than the above function
+
+        #probs = model.predict_proba(X_val_vec)[:, 1]
+        #precision, recall, thresholds = precision_recall_curve(y_val_vec, probs)
+        #f1_scores = 2 * (precision * recall) / (precision + recall)
+        #best_idx = np.argmax(f1_scores)
+        #best_t = thresholds[best_idx]
+
+
+        #manually setting threshold for testing
+        #best_t = 0.4
+
+        # Apply threshold
+        val_probs = model.predict_proba(X_val_vec)[:, 1]
+        y_pred = (val_probs >= best_t).astype(int)
+
+    else:
+        # models with no .predict_proba
+        y_pred = model.predict(X_val_vec)
+        best_t = None
+
+    # ---- EVALUATE ----
+    final_f1 = evaluate_and_plot(
+        y_val_vec, y_pred, output_dir,
+        num_labels=len(np.unique(np.concatenate((y_train_vec, y_val_vec)))),
+        model_name=model_name
+    )
+
+    logger.info(f"[{model_name}] Training complete. Macro F1: {final_f1:.4f}. "
+                f"Time: {(time.time()-start)/60:.2f} mins")
+    return final_f1, best_t
+
+
+
+# ***************** NORMAL EVALUATION FOR TFIDF MODELS *****************
+'''
     model = MODEL_REGISTRY[model_name]
     logger.info(f"Training {model_name} (sparse TF-IDF ML model)...")
     start = time.time()
@@ -347,6 +472,11 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
                                  model_name=model_name)
     logger.info(f"[{model_name}] Training complete. Macro F1: {final_f1:.4f}. Time: {(time.time()-start)/60:.2f} mins")
     return final_f1
+'''
+
+
+
+
 
 # ---------------- MAIN ----------------
 def main():
@@ -381,7 +511,7 @@ def main():
     # tokenization (PyTorch DataLoader (tokenization))
     # codeBert (PyTorch DataLoader(codebert specifiz tokenization))
     train_loader , val_loader, vectorizerORtokenizerORWhatever = loadData(
-        "codeBert", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
+        "tfidf-sklearn", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
     )
 
     #for m in models_to_run:
