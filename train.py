@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
@@ -235,55 +236,9 @@ def find_best_threshold(model, X_val, y_val):
 
 
 
+# ----------------------- OLD TRAINING LOOP -----------------------
 
-# ---------------- MODEL REGISTRY ----------------
-MODEL_REGISTRY = {
-    'A': LogisticRegression(max_iter=2000, n_jobs=-1,class_weight='balanced'),
-    'B': BiLSTMClassifier,
-    'C': CodeBERTClassifier,
-    'D': MultinomialNB(),
-    'E': RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42),
-    'F': SVMClassifier(),
-    'G': TextCNNClassifier,
-}
-
-# ---------------- UNIFIED TRAIN FUNCTION ----------------
-def train_model(model_name, train_loader, val_loader, output_dir, num_labels=None, **kwargs):
-    start_time = time.time()
-    logger.info(f"\nTraining model: {model_name}")
-
-    # Determine device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if model_name in ['B', 'G', 'C']:
-        logger.info(f"Using device: {device}")
-
-    # ---------------- PyTorch token models: BiLSTM/TextCNN ----------------
-    if model_name in ['B', 'G']:
-        vocab_size = kwargs.get('vocab_size')
-        num_labels = kwargs.get('num_labels', 2)
-        num_epochs = kwargs.get('epochs', 5)
-
-        if model_name == 'B':
-            model = BiLSTMClassifier(
-                vocab_size=vocab_size,
-                embedding_dim=100,
-                hidden_dim=128,
-                num_layers=2,
-                num_classes=num_labels
-            ).to(device)
-        elif model_name == 'G':
-            model = TextCNNClassifier(
-                vocab_size=vocab_size,
-                embedding_dim=100,
-                num_classes=num_labels
-            ).to(device)
-
-
-
-
-
-
-
+'''
 
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=kwargs.get('learning_rate', 1e-3))
@@ -329,6 +284,158 @@ def train_model(model_name, train_loader, val_loader, output_dir, num_labels=Non
         total_time = time.time() - start_time
         logger.info(f"[{model_name}] Training complete. Best Macro F1: {best_f1:.4f}. Total time: {total_time/60:.2f} mins")
         return best_f1
+
+'''
+#-------------------- OLD TRIANIN LOOOOOP ENDS HERE --------------------
+
+
+# ---------------- MODEL REGISTRY ----------------
+MODEL_REGISTRY = {
+    'A': LogisticRegression(max_iter=2000, n_jobs=-1,class_weight='balanced'),
+    'B': BiLSTMClassifier,
+    'C': CodeBERTClassifier,
+    'D': MultinomialNB(),
+    'E': RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42),
+    'F': SVMClassifier(),
+    'G': TextCNNClassifier,
+}
+
+# ---------------- UNIFIED TRAIN FUNCTION ----------------
+def train_model(model_name, train_loader, val_loader, output_dir, num_labels=None, **kwargs):
+    start_time = time.time()
+    logger.info(f"\nTraining model: {model_name}")
+
+    # Determine device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if model_name in ['B', 'G', 'C']:
+        logger.info(f"Using device: {device}")
+
+    # ---------------- PyTorch token models: BiLSTM/TextCNN ----------------
+    if model_name in ['B', 'G']:
+        vocab_size = kwargs.get('vocab_size')
+        num_labels = kwargs.get('num_labels', 2)
+        num_epochs = kwargs.get('epochs', 5)
+
+        if model_name == 'B':
+            model = BiLSTMClassifier(
+                vocab_size=vocab_size,
+                embedding_dim=100,
+                hidden_dim=128,
+                num_layers=2,
+                num_classes=num_labels
+            ).to(device)
+      
+      #  elif model_name == 'G':
+       #     model = TextCNNClassifier(
+        #        vocab_size=vocab_size,
+         #       embedding_dim=100,
+          #      num_classes=num_labels
+           # ).to(device)
+        elif model_name == 'G':
+            model = TextCNNClassifier(
+                vocab_size=vocab_size,
+                embedding_dim=128,       # Increased from 100
+                num_filters=256,         # Increased from 100
+                kernel_sizes=[1,2,3,4,5],# Better for code
+                num_classes=num_labels
+            ).to(device)
+
+
+
+# ------------------- NEW TRAINING LOOP -------------------
+
+# 2. WEIGHTED LOSS (Crucial for Macro F1 on skewed data)
+        # Assuming Training data is also skewed. If you don't know the exact count, 
+        # a safe bet for Human(0)/Machine(1) is usually to weight the minority class higher.
+        # If dataset is 50/50, remove the weight. If it's 75/25, weight=[1.0, 3.0]
+        # Let's assume training is similar to test (77% human, 23% machine)
+        #class_weights = torch.tensor([1.0, 3.0]).to(device) 
+        #criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+        # ---------------- OLD (Weighted) ----------------
+        # class_weights = torch.tensor([1.0, 3.35]).to(device) 
+        # criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+        # ---------------- NEW (Balanced) ----------------
+        # No weights needed!
+        criterion = nn.CrossEntropyLoss()   
+
+        # 3. OPTIMIZER & SCHEDULER
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+
+        best_f1 = 0.0
+        early_stop_count = 0
+        patience = 4 # Stop if no improvement for 4 epochs
+
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.time()
+            model.train()
+            pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{num_epochs}', unit='batch')
+            
+            for sequences, labels in pbar:
+                sequences, labels = sequences.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = model(sequences)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+            # Validation
+            model.eval()
+            val_probs = []
+            val_true = []
+            with torch.no_grad():
+                for sequences, labels in val_loader:
+                    sequences, labels = sequences.to(device), labels.to(device)
+                    outputs = model(sequences)
+                    # Get probabilities using Softmax for threshold tuning
+                    probs = F.softmax(outputs, dim=1)[:, 1] 
+                    val_probs.extend(probs.cpu().numpy())
+                    val_true.extend(labels.cpu().numpy())
+            
+            val_true = np.array(val_true)
+            val_probs = np.array(val_probs)
+
+            # 4. FIND BEST THRESHOLD (Maximizing Macro F1)
+            # Instead of default 0.5, we scan for the best split
+            thresholds = np.linspace(0.1, 0.9, 50)
+            best_epoch_f1 = 0
+            best_epoch_thresh = 0.5
+            
+            for t in thresholds:
+                temp_preds = (val_probs >= t).astype(int)
+                f1 = f1_score(val_true, temp_preds, average='macro')
+                if f1 > best_epoch_f1:
+                    best_epoch_f1 = f1
+                    best_epoch_thresh = t
+
+            # Log results
+            logger.info(f"Epoch {epoch} finished. Best Thresh: {best_epoch_thresh:.2f}, Macro F1: {best_epoch_f1:.4f}")
+            
+            # Step the scheduler based on F1 score
+            scheduler.step(best_epoch_f1)
+
+            if best_epoch_f1 > best_f1:
+                best_f1 = best_epoch_f1
+                early_stop_count = 0
+                torch.save(model.state_dict(), os.path.join(output_dir, f'{model_name}_best_model.pth'))
+                # Also save the threshold to use during inference!
+                with open(os.path.join(output_dir, f'{model_name}_threshold.txt'), 'w') as f:
+                    f.write(str(best_epoch_thresh))
+            else:
+                early_stop_count += 1
+                if early_stop_count >= patience:
+                    logger.info("Early stopping triggered.")
+                    break
+        
+        return best_f1
+
+
+# ------------------- NEW TRAINING LOOP -------------------
+
+
 
     # ---------------- CodeBERT (C) ----------------
     if model_name == 'C':
@@ -511,7 +618,7 @@ def main():
     # tokenization (PyTorch DataLoader (tokenization))
     # codeBert (PyTorch DataLoader(codebert specifiz tokenization))
     train_loader , val_loader, vectorizerORtokenizerORWhatever = loadData(
-        "tfidf-sklearn", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
+        "tokenization", batch_size=args.batch_size, max_features=args.max_features, sample_size=args.sample_size
     )
 
     #for m in models_to_run:

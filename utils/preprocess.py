@@ -8,6 +8,9 @@ import torch
 import pandas as pd
 from torch.utils.data import TensorDataset
 import numpy as np
+import re
+import torch
+from torch.nn.utils.rnn import pad_sequence
 
 
 
@@ -203,7 +206,9 @@ def modified_tfidf(train_path, val_path, save_dir="vectorizer",
 # Tokenization preprocessing (for TextCNN / LSTM)
 # PYTORCH
 # =============================
-class Tokenizer:
+
+# THIS IS THE OLD TOKENIZATION I WAS DOING
+'''
     """Simple word-level tokenizer with vocab building."""
     def __init__(self, min_freq=1):
         self.vocab = {"<PAD>": 0, "<UNK>": 1}
@@ -224,6 +229,46 @@ class Tokenizer:
         """Convert a text string to list of token IDs"""
         return torch.tensor([self.vocab.get(tok, self.vocab["<UNK>"]) for tok in text.split()],
                             dtype=torch.long)
+'''
+
+
+
+class Tokenizer:
+    def __init__(self, min_freq=2, max_vocab=50000):
+        self.vocab = {"<PAD>": 0, "<UNK>": 1}
+        self.freq = {}
+        self.min_freq = min_freq
+        self.max_vocab = max_vocab
+        # Regex to capture words OR non-whitespace symbols
+        self.pattern = re.compile(r'\w+|[^\w\s]') 
+
+    def tokenize(self, text):
+        # Converts "print(a)" -> ["print", "(", "a", ")"]
+        return self.pattern.findall(text.lower()) 
+
+    def build_vocab(self, texts):
+        print("Building vocabulary...")
+        for text in texts:
+            for tok in self.tokenize(text):
+                self.freq[tok] = self.freq.get(tok, 0) + 1
+        
+        # Sort by frequency and cut off
+        sorted_toks = sorted(self.freq.items(), key=lambda x: x[1], reverse=True)
+        for tok, count in sorted_toks:
+            if count >= self.min_freq:
+                if len(self.vocab) >= self.max_vocab:
+                    break
+                self.vocab[tok] = len(self.vocab)
+        print(f"Vocab size: {len(self.vocab)}")
+        return self.vocab
+
+    def text_to_ids(self, text):
+        tokens = self.tokenize(text)
+        # Cap max length to 1024 to prevent OOM errors on long code
+        tokens = tokens[:1024] 
+        return torch.tensor([self.vocab.get(tok, self.vocab["<UNK>"]) for tok in tokens],
+                            dtype=torch.long)         
+                            
 
 def tokenize_and_pad(texts, tokenizer):
     """Tokenize and pad a list of texts"""

@@ -135,7 +135,7 @@ def loadData(mode="tfidf", batch_size=32, max_features=20000, sample_size=None):
             pass
 
         # Return only loaders (tokenizer available via dataset.tokenizer)
-        return train_loader, val_loader
+        return train_loader, val_loader, tokenizer
 
     if mode == "codeBert":
         logger.info("Starting CodeBERT preprocessing")
